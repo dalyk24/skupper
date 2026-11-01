@@ -40,6 +40,9 @@ func (s *StatusSyncClient) Update(ctx context.Context, latest *corev1.ConfigMap)
 	return s.client.Update(*latest, true)
 }
 
+// siteCollector creates the network status ConfigMap, runs the status sync
+// against the local router and blocks until ctx is canceled and the sync has
+// stopped. The ConfigMap is removed on return, including when setup fails.
 func siteCollector(ctx context.Context, namespace string) error {
 	platformLoader := &common.NamespacePlatformLoader{}
 	platform, err := platformLoader.Load(namespace)

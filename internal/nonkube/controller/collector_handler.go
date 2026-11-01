@@ -32,6 +32,10 @@ type CollectorLifecycleHandler struct {
 	lastDone <-chan struct{}
 }
 
+// Start launches a collector generation unless one is already running. The
+// new generation waits for the previous one to finish before it starts, so
+// two collectors never share the status ConfigMap at the same time. Start
+// itself returns immediately. Closing stopCh stops the running generation.
 func (c *CollectorLifecycleHandler) Start(stopCh <-chan struct{}) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
@@ -44,10 +48,10 @@ func (c *CollectorLifecycleHandler) Start(stopCh <-chan struct{}) {
 	if c.startMethod == nil {
 		c.startMethod = c.startCollectorLite
 	}
-	// Capture ctx by value before releasing the lock. Goroutines must not
-	// read c.ctx through the struct pointer after the lock is dropped: a
-	// subsequent Start() call writes a new c.ctx under the lock, which would
-	// race with the goroutine reading the old value via c.ctx.Done().
+	// Capture ctx by value while the lock is held. Goroutines must not read
+	// c.ctx through the struct pointer once the lock is dropped: a later
+	// Start() call writes a new c.ctx under the lock, which would race with
+	// a goroutine reading the old value via c.ctx.Done().
 	ctx := c.ctx
 	start := c.startMethod
 	prev := c.lastDone
@@ -63,6 +67,8 @@ func (c *CollectorLifecycleHandler) Start(stopCh <-chan struct{}) {
 	go c.handleShutdown(ctx, stopCh)
 }
 
+// handleShutdown stops the handler when stopCh closes, and returns without
+// stopping anything when ctx is canceled first (for example by Stop).
 func (c *CollectorLifecycleHandler) handleShutdown(ctx context.Context, stopCh <-chan struct{}) {
 	const stopMsg = "Stopping collector lifecycle handler"
 	select {
@@ -91,6 +97,10 @@ func (c *CollectorLifecycleHandler) Id() string {
 	return "collector.handler"
 }
 
+// startCollectorLite runs the collector for one generation and blocks until
+// ctx is canceled. It returns immediately if ctx is already canceled, so a
+// generation that was stopped before it was scheduled never touches the
+// shared status ConfigMap.
 func (c *CollectorLifecycleHandler) startCollectorLite(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		c.logger.Info("Skipping stale collector startup", slog.Any("reason", err))

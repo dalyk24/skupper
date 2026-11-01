@@ -8,6 +8,8 @@ import (
 	"gotest.tools/v3/assert"
 )
 
+// TestCollectorHandler checks the start, stop, restart and parent-stop
+// lifecycle of CollectorLifecycleHandler using a fake start method.
 func TestCollectorHandler(t *testing.T) {
 	started := make(chan struct{})
 	done := make(chan struct{})

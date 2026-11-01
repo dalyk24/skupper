@@ -93,11 +93,14 @@ func setupCollectorFS(t *testing.T) string {
 	return filepath.Join(nsDir, string(api.RuntimeSiteStatePath), "ConfigMap-skupper-network-status.yaml")
 }
 
+// fileExists reports whether p exists.
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
 
+// waitFor polls cond until it returns true or timeout elapses, and reports
+// whether cond became true.
 func waitFor(cond func() bool, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -109,40 +112,63 @@ func waitFor(cond func() bool, timeout time.Duration) bool {
 	return cond()
 }
 
+// lastGeneration returns the done channel of the most recently started
+// generation. It is closed once that generation has returned from its start
+// method, which for the real collector means its status ConfigMap is gone.
+func lastGeneration(h *CollectorLifecycleHandler) <-chan struct{} {
+	h.mux.Lock()
+	defer h.mux.Unlock()
+	return h.lastDone
+}
+
 // TestCollectorHandlerRestartKeepsStatus restarts the real collector back to
 // back, both before and after the first generation has written its status
-// ConfigMap, and asserts that once the generations have settled the current
-// generation's ConfigMap is present. A stale generation's cleanup must not
-// remove it.
+// ConfigMap. It waits for the first generation to finish, which removes its
+// ConfigMap, and then requires the second generation to create its own and
+// keep it until it is stopped. A stale generation's cleanup must never remove
+// the current generation's ConfigMap.
 func TestCollectorHandlerRestartKeepsStatus(t *testing.T) {
 	cmPath := setupCollectorFS(t)
-	const rounds = 20
+	const (
+		rounds  = 20
+		timeout = 5 * time.Second
+	)
 	for i := 0; i < rounds; i++ {
 		h := NewCollectorLifecycleHandler(generationTestNamespace)
 		stopCh := make(chan struct{})
 
 		h.Start(stopCh)
+		gen1Done := lastGeneration(h)
 		if i%2 == 0 {
 			// let generation 1 get as far as writing the ConfigMap
-			if !waitFor(func() bool { return fileExists(cmPath) }, 2*time.Second) {
+			if !waitFor(func() bool { return fileExists(cmPath) }, timeout) {
 				t.Fatalf("round %d: gen1 never created %s", i, cmPath)
 			}
 		}
 		h.Stop()
 		h.Start(stopCh) // generation 2, immediately after Stop
+		gen2Done := lastGeneration(h)
 
-		// Generation 1's file may still be on disk, so presence alone does
-		// not mean generation 2 has started. Allow time for gen1 cleanup and
-		// gen2 setup, then require the file to be there.
-		time.Sleep(100 * time.Millisecond)
-		if !fileExists(cmPath) {
-			t.Fatalf("round %d: gen2's status ConfigMap is missing after restart", i)
+		// Generation 1 removes its ConfigMap before it finishes, so after
+		// this wait the only file that can exist belongs to generation 2.
+		select {
+		case <-gen1Done:
+		case <-time.After(timeout):
+			t.Fatalf("round %d: gen1 did not finish after Stop", i)
+		}
+		if !waitFor(func() bool { return fileExists(cmPath) }, timeout) {
+			t.Fatalf("round %d: gen2 never created %s after gen1 finished", i, cmPath)
 		}
 
 		h.Stop()
-		close(stopCh)
-		if !waitFor(func() bool { return !fileExists(cmPath) }, 2*time.Second) {
-			t.Fatalf("round %d: ConfigMap not removed after final Stop", i)
+		select {
+		case <-gen2Done:
+		case <-time.After(timeout):
+			t.Fatalf("round %d: gen2 did not finish after Stop", i)
 		}
+		if fileExists(cmPath) {
+			t.Fatalf("round %d: ConfigMap left behind after gen2 finished", i)
+		}
+		close(stopCh)
 	}
 }
